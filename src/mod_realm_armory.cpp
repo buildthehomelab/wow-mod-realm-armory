@@ -1,6 +1,8 @@
 #include "Chat.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
+#include "DBCStores.h"
+#include "ObjectMgr.h"
 #include "ScriptMgr.h"
 
 #include <algorithm>
@@ -34,6 +36,7 @@ namespace realm_armory
     {
         uint32 Entry = 0;
         std::string Name;
+        std::string Icon;
         uint32 Quality = 0;
         uint32 ItemLevel = 0;
     };
@@ -130,7 +133,7 @@ namespace realm_armory
     std::set<uint32> LoadPlayerbotAccounts()
     {
         std::set<uint32> accounts;
-        if (!IncludePlayerbots || PlayerbotAccountPrefix.empty())
+        if (PlayerbotAccountPrefix.empty())
             return accounts;
 
         std::string prefix = PlayerbotAccountPrefix;
@@ -194,18 +197,23 @@ namespace realm_armory
             equipped.Slot = f[0].Get<uint8>();
             equipped.Item.Entry = f[1].Get<uint32>();
 
-            QueryResult itemResult = WorldDatabase.Query(
-                "SELECT name, Quality, ItemLevel FROM item_template WHERE entry = {}",
-                equipped.Item.Entry);
-            if (itemResult)
+            if (ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(equipped.Item.Entry))
             {
-                Field* item = itemResult->Fetch();
-                equipped.Item.Name = item[0].Get<std::string>();
-                equipped.Item.Quality = item[1].Get<uint32>();
-                equipped.Item.ItemLevel = item[2].Get<uint32>();
+                equipped.Item.Name = itemTemplate->Name1;
+                equipped.Item.Quality = itemTemplate->Quality;
+                equipped.Item.ItemLevel = itemTemplate->ItemLevel;
+
+                if (ItemDisplayInfoEntry const* displayInfo =
+                        sItemDisplayInfoStore.LookupEntry(itemTemplate->DisplayInfoID))
+                {
+                    if (displayInfo->inventoryIcon)
+                        equipped.Item.Icon = displayInfo->inventoryIcon;
+                }
             }
+
             equipment.push_back(std::move(equipped));
         } while (result->NextRow());
+
         return equipment;
     }
 
