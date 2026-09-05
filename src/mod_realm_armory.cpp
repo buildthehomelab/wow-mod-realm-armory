@@ -331,15 +331,20 @@ namespace realm_armory
     public:
         RealmArmoryCommandScript() : CommandScript("RealmArmoryCommandScript") { }
 
-        ChatCommandTable GetCommands() const override
+        std::vector<Acore::ChatCommands::ChatCommandBuilder> GetCommands() const override
         {
-            static ChatCommandTable sub = {
+            using Acore::ChatCommands::ChatCommandBuilder;
+            using Acore::ChatCommands::Console;
+
+            static std::vector<ChatCommandBuilder> sub = {
                 { "status", HandleStatus, SEC_ADMINISTRATOR, Console::Yes },
                 { "publish", HandlePublish, SEC_ADMINISTRATOR, Console::Yes }
             };
-            static ChatCommandTable root = {
+
+            static std::vector<ChatCommandBuilder> root = {
                 { "realmarmory", sub }
             };
+
             return root;
         }
 
