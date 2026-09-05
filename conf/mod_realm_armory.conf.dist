@@ -1,0 +1,21 @@
+[worldserver]
+
+# Enable Realm Armory JSON publishing.
+RealmArmory.Enable = 1
+
+# Directory relative to the worldserver working directory unless absolute.
+# The module creates this directory and a characters/ child directory.
+RealmArmory.OutputDirectory = "/mnt/ai_data/linkable/armory"
+
+# Rebuild the public roster/profile files periodically.
+RealmArmory.UpdateIntervalMinutes = 15
+
+# Characters below this level are omitted.
+RealmArmory.MinimumLevel = 1
+
+# Include random Playerbots in the public roster.
+RealmArmory.IncludePlayerbots = 1
+
+# Account-name prefix used by mod-playerbots for random bot accounts.
+# This should match AiPlayerbot.RandomBotAccountPrefix.
+RealmArmory.PlayerbotAccountPrefix = "rndbot"
