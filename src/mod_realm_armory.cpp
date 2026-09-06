@@ -238,6 +238,7 @@ namespace realm_armory
             out << "      {\"slot\": " << uint32(e.Slot)
                 << ", \"entry\": " << e.Item.Entry
                 << ", \"name\": \"" << JsonEscape(e.Item.Name)
+                << "\", \"icon\": \"" << JsonEscape(e.Item.Icon)
                 << "\", \"quality\": " << e.Item.Quality
                 << ", \"itemLevel\": " << e.Item.ItemLevel << "}";
             if (i + 1 != equipment.size()) out << ',';
