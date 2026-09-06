@@ -29,21 +29,61 @@ namespace realm_armory
         uint8 Class = 0;
         uint8 Gender = 0;
         uint8 Level = 0;
+        uint8 Skin = 0;
+        uint8 Face = 0;
+        uint8 HairStyle = 0;
+        uint8 HairColor = 0;
+        uint8 FacialStyle = 0;
         bool Playerbot = false;
+    };
+
+    struct ItemStatInfo
+    {
+        uint32 Type = 0;
+        int32 Value = 0;
+    };
+
+    struct ItemDamageInfo
+    {
+        float Min = 0.0f;
+        float Max = 0.0f;
+        uint32 Type = 0;
     };
 
     struct ItemInfo
     {
         uint32 Entry = 0;
+        uint32 DisplayId = 0;
         std::string Name;
         std::string Icon;
         uint32 Quality = 0;
         uint32 ItemLevel = 0;
+        uint32 ItemClass = 0;
+        uint32 SubClass = 0;
+        uint32 InventoryType = 0;
+        uint32 RequiredLevel = 0;
+        uint32 Bonding = 0;
+        uint32 Armor = 0;
+        uint32 Block = 0;
+        uint32 Delay = 0;
+        uint32 MaxDurability = 0;
+        int32 HolyRes = 0;
+        int32 FireRes = 0;
+        int32 NatureRes = 0;
+        int32 FrostRes = 0;
+        int32 ShadowRes = 0;
+        int32 ArcaneRes = 0;
+        std::string Description;
+        std::vector<ItemStatInfo> Stats;
+        std::vector<ItemDamageInfo> Damage;
+        std::vector<uint32> SocketColors;
     };
 
     struct EquippedItem
     {
         uint8 Slot = 0;
+        uint32 CurrentDurability = 0;
+        std::string Enchantments;
         ItemInfo Item;
     };
 
@@ -156,7 +196,8 @@ namespace realm_armory
         std::vector<CharacterRow> rows;
         auto botAccounts = LoadPlayerbotAccounts();
         QueryResult result = CharacterDatabase.Query(
-            "SELECT guid, account, name, race, class, gender, level "
+            "SELECT guid, account, name, race, class, gender, level, "
+            "skin, face, hairStyle, hairColor, facialStyle "
             "FROM characters WHERE level >= {} ORDER BY name", MinimumLevel);
         if (!result)
             return rows;
@@ -172,6 +213,11 @@ namespace realm_armory
             row.Class = f[4].Get<uint8>();
             row.Gender = f[5].Get<uint8>();
             row.Level = f[6].Get<uint8>();
+            row.Skin = f[7].Get<uint8>();
+            row.Face = f[8].Get<uint8>();
+            row.HairStyle = f[9].Get<uint8>();
+            row.HairColor = f[10].Get<uint8>();
+            row.FacialStyle = f[11].Get<uint8>();
             row.Playerbot = botAccounts.count(row.Account) != 0;
             if (!row.Playerbot || IncludePlayerbots)
                 rows.push_back(std::move(row));
@@ -183,7 +229,8 @@ namespace realm_armory
     {
         std::vector<EquippedItem> equipment;
         QueryResult result = CharacterDatabase.Query(
-            "SELECT ci.slot, ii.itemEntry FROM character_inventory ci "
+            "SELECT ci.slot, ii.itemEntry, ii.durability, ii.enchantments "
+            "FROM character_inventory ci "
             "INNER JOIN item_instance ii ON ii.guid = ci.item "
             "WHERE ci.guid = {} AND ci.bag = 0 AND ci.slot BETWEEN 0 AND 18 "
             "ORDER BY ci.slot", guid);
@@ -196,12 +243,59 @@ namespace realm_armory
             EquippedItem equipped;
             equipped.Slot = f[0].Get<uint8>();
             equipped.Item.Entry = f[1].Get<uint32>();
+            equipped.CurrentDurability = f[2].Get<uint16>();
+            equipped.Enchantments = f[3].Get<std::string>();
 
             if (ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(equipped.Item.Entry))
             {
+                equipped.Item.DisplayId = itemTemplate->DisplayInfoID;
                 equipped.Item.Name = itemTemplate->Name1;
                 equipped.Item.Quality = itemTemplate->Quality;
                 equipped.Item.ItemLevel = itemTemplate->ItemLevel;
+                equipped.Item.ItemClass = itemTemplate->Class;
+                equipped.Item.SubClass = itemTemplate->SubClass;
+                equipped.Item.InventoryType = itemTemplate->InventoryType;
+                equipped.Item.RequiredLevel = itemTemplate->RequiredLevel;
+                equipped.Item.Bonding = itemTemplate->Bonding;
+                equipped.Item.Armor = itemTemplate->Armor;
+                equipped.Item.Block = itemTemplate->Block;
+                equipped.Item.Delay = itemTemplate->Delay;
+                equipped.Item.MaxDurability = itemTemplate->MaxDurability;
+                equipped.Item.HolyRes = itemTemplate->HolyRes;
+                equipped.Item.FireRes = itemTemplate->FireRes;
+                equipped.Item.NatureRes = itemTemplate->NatureRes;
+                equipped.Item.FrostRes = itemTemplate->FrostRes;
+                equipped.Item.ShadowRes = itemTemplate->ShadowRes;
+                equipped.Item.ArcaneRes = itemTemplate->ArcaneRes;
+                equipped.Item.Description = itemTemplate->Description;
+
+                for (uint32 i = 0; i < itemTemplate->StatsCount && i < MAX_ITEM_PROTO_STATS; ++i)
+                {
+                    ItemStatInfo stat;
+                    stat.Type = itemTemplate->ItemStat[i].ItemStatType;
+                    stat.Value = itemTemplate->ItemStat[i].ItemStatValue;
+                    if (stat.Value != 0)
+                        equipped.Item.Stats.push_back(stat);
+                }
+
+                for (uint32 i = 0; i < MAX_ITEM_PROTO_DAMAGES; ++i)
+                {
+                    if (itemTemplate->Damage[i].DamageMin == 0.0f &&
+                        itemTemplate->Damage[i].DamageMax == 0.0f)
+                        continue;
+
+                    ItemDamageInfo damage;
+                    damage.Min = itemTemplate->Damage[i].DamageMin;
+                    damage.Max = itemTemplate->Damage[i].DamageMax;
+                    damage.Type = itemTemplate->Damage[i].DamageType;
+                    equipped.Item.Damage.push_back(damage);
+                }
+
+                for (uint32 i = 0; i < MAX_ITEM_PROTO_SOCKETS; ++i)
+                {
+                    if (itemTemplate->Socket[i].Color != 0)
+                        equipped.Item.SocketColors.push_back(itemTemplate->Socket[i].Color);
+                }
 
                 if (ItemDisplayInfoEntry const* displayInfo =
                         sItemDisplayInfoStore.LookupEntry(itemTemplate->DisplayInfoID))
@@ -231,19 +325,80 @@ namespace realm_armory
         out << "    \"class\": " << uint32(row.Class) << ",\n";
         out << "    \"gender\": " << uint32(row.Gender) << ",\n";
         out << "    \"playerbot\": " << (row.Playerbot ? "true" : "false") << ",\n";
+        out << "    \"appearance\": {"
+            << "\"skin\": " << uint32(row.Skin)
+            << ", \"face\": " << uint32(row.Face)
+            << ", \"hairStyle\": " << uint32(row.HairStyle)
+            << ", \"hairColor\": " << uint32(row.HairColor)
+            << ", \"facialStyle\": " << uint32(row.FacialStyle)
+            << "},\n";
         out << "    \"equipment\": [\n";
+
         for (size_t i = 0; i < equipment.size(); ++i)
         {
             auto const& e = equipment[i];
             out << "      {\"slot\": " << uint32(e.Slot)
                 << ", \"entry\": " << e.Item.Entry
+                << ", \"displayId\": " << e.Item.DisplayId
                 << ", \"name\": \"" << JsonEscape(e.Item.Name)
                 << "\", \"icon\": \"" << JsonEscape(e.Item.Icon)
                 << "\", \"quality\": " << e.Item.Quality
-                << ", \"itemLevel\": " << e.Item.ItemLevel << "}";
+                << ", \"itemLevel\": " << e.Item.ItemLevel
+                << ", \"itemClass\": " << e.Item.ItemClass
+                << ", \"subClass\": " << e.Item.SubClass
+                << ", \"inventoryType\": " << e.Item.InventoryType
+                << ", \"requiredLevel\": " << e.Item.RequiredLevel
+                << ", \"bonding\": " << e.Item.Bonding
+                << ", \"armor\": " << e.Item.Armor
+                << ", \"block\": " << e.Item.Block
+                << ", \"delay\": " << e.Item.Delay
+                << ", \"currentDurability\": " << e.CurrentDurability
+                << ", \"maxDurability\": " << e.Item.MaxDurability
+                << ", \"holyRes\": " << e.Item.HolyRes
+                << ", \"fireRes\": " << e.Item.FireRes
+                << ", \"natureRes\": " << e.Item.NatureRes
+                << ", \"frostRes\": " << e.Item.FrostRes
+                << ", \"shadowRes\": " << e.Item.ShadowRes
+                << ", \"arcaneRes\": " << e.Item.ArcaneRes
+                << ", \"description\": \"" << JsonEscape(e.Item.Description) << "\"";
+
+            out << ", \"stats\": [";
+            for (size_t s = 0; s < e.Item.Stats.size(); ++s)
+            {
+                auto const& stat = e.Item.Stats[s];
+                out << "{\"type\": " << stat.Type << ", \"value\": " << stat.Value << "}";
+                if (s + 1 != e.Item.Stats.size()) out << ',';
+            }
+            out << ']';
+
+            out << ", \"damage\": [";
+            for (size_t d = 0; d < e.Item.Damage.size(); ++d)
+            {
+                auto const& damage = e.Item.Damage[d];
+                out << "{\"min\": " << damage.Min
+                    << ", \"max\": " << damage.Max
+                    << ", \"type\": " << damage.Type << "}";
+                if (d + 1 != e.Item.Damage.size()) out << ',';
+            }
+            out << ']';
+
+            out << ", \"socketColors\": [";
+            for (size_t s = 0; s < e.Item.SocketColors.size(); ++s)
+            {
+                out << e.Item.SocketColors[s];
+                if (s + 1 != e.Item.SocketColors.size()) out << ',';
+            }
+            out << ']';
+
+            // Keep the raw instance enchantment field available for later
+            // gem/enchant-aware rendering without exposing any private data.
+            out << ", \"enchantments\": \"" << JsonEscape(e.Enchantments) << "\"";
+            out << '}';
+
             if (i + 1 != equipment.size()) out << ',';
             out << '\n';
         }
+
         out << "    ]\n  }\n}\n";
         return out.str();
     }
