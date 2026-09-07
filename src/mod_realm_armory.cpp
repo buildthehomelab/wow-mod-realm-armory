@@ -3,6 +3,10 @@
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
 #include "ObjectMgr.h"
+#include "Item.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
+#include "ArmoryEnchantments.h"
 #include "ScriptMgr.h"
 
 #include <algorithm>
@@ -311,6 +315,118 @@ namespace realm_armory
         return equipment;
     }
 
+    // DBC effect arguments are type-dependent: stat IDs, spell IDs, resistance masks, etc.
+    void WriteEnchant(std::ostream& out, ArmoryEnchantments::Slot const& slot)
+    {
+        if (!slot.Id)
+        {
+            out << "null";
+            return;
+        }
+        auto const* enchant = sSpellItemEnchantmentStore.LookupEntry(slot.Id);
+        out << "{\"id\":" << slot.Id << ",\"duration\":" << slot.Duration
+            << ",\"charges\":" << slot.Charges << ",\"resolved\":" << (enchant ? "true" : "false");
+        if (enchant)
+        {
+            out << ",\"description\":\"" << JsonEscape(enchant->description[0] ? enchant->description[0] : "")
+                << "\",\"conditionId\":" << enchant->EnchantmentCondition << ",\"effects\":[";
+            bool first = true;
+            for (uint32 i = 0; i < MAX_SPELL_ITEM_ENCHANTMENT_EFFECTS; ++i)
+            {
+                if (!enchant->type[i]) continue;
+                if (!first) out << ',';
+                first = false;
+                out << "{\"type\":" << enchant->type[i] << ",\"amount\":" << enchant->amount[i]
+                    << ",\"argument\":" << enchant->spellid[i] << '}';
+            }
+            out << ']';
+        }
+        out << '}';
+    }
+
+    void WriteInstanceDetails(std::ostream& out, EquippedItem const& item)
+    {
+        static_assert(MAX_ENCHANTMENT_SLOT == ArmoryEnchantments::SlotCount);
+        static_assert(MAX_ENCHANTMENT_OFFSET == 3);
+        auto parsed = ArmoryEnchantments::Parse(item.Enchantments);
+        out << ",\"enchantmentsValid\":" << (parsed.Valid ? "true" : "false");
+        // Invalid fields remain available verbatim, but never become plausible derived data.
+        if (parsed.Valid)
+        {
+            out << ",\"permanentEnchant\":";
+            WriteEnchant(out, parsed.Slots[PERM_ENCHANTMENT_SLOT]);
+            out << ",\"temporaryEnchant\":";
+            WriteEnchant(out, parsed.Slots[TEMP_ENCHANTMENT_SLOT]);
+            out << ",\"prismaticEnchant\":";
+            WriteEnchant(out, parsed.Slots[PRISMATIC_ENCHANTMENT_SLOT]);
+            out << ",\"socketBonus\":";
+            WriteEnchant(out, parsed.Slots[BONUS_ENCHANTMENT_SLOT]);
+            out << ",\"gems\":[";
+            bool first = true;
+            for (uint32 i = 0; i < MAX_ITEM_PROTO_SOCKETS; ++i)
+            {
+                auto const& slot = parsed.Slots[SOCK_ENCHANTMENT_SLOT + i];
+                if (!slot.Id) continue;
+                if (!first) out << ',';
+                first = false;
+                out << "{\"socketIndex\":" << i << ",\"enchant\":";
+                WriteEnchant(out, slot);
+                auto const* enchant = sSpellItemEnchantmentStore.LookupEntry(slot.Id);
+                if (enchant && enchant->GemID)
+                {
+                    out << ",\"entry\":" << enchant->GemID;
+                    if (auto const* gem = sObjectMgr->GetItemTemplate(enchant->GemID))
+                    {
+                        out << ",\"name\":\"" << JsonEscape(gem->Name1) << "\",\"quality\":" << gem->Quality;
+                        if (auto const* display = sItemDisplayInfoStore.LookupEntry(gem->DisplayInfoID))
+                            out << ",\"icon\":\"" << JsonEscape(display->inventoryIcon ? display->inventoryIcon : "") << '"';
+                        if (auto const* properties = sGemPropertiesStore.LookupEntry(gem->GemProperties))
+                            out << ",\"color\":" << properties->color;
+                    }
+                }
+                out << '}';
+            }
+            out << ']';
+        }
+        if (auto const* proto = sObjectMgr->GetItemTemplate(item.Item.Entry))
+        {
+            out << ",\"socketBonusId\":" << proto->socketBonus << ",\"sockets\":[";
+            for (uint32 i = 0; i < MAX_ITEM_PROTO_SOCKETS; ++i)
+            {
+                if (i) out << ',';
+                out << "{\"index\":" << i << ",\"color\":" << proto->Socket[i].Color << '}';
+            }
+            out << "],\"spells\":[";
+            bool first = true;
+            for (auto const& spell : proto->Spells)
+            {
+                if (spell.SpellId <= 0) continue;
+                if (!first) out << ',';
+                first = false;
+                out << "{\"id\":" << spell.SpellId << ",\"trigger\":" << spell.SpellTrigger
+                    << ",\"charges\":" << spell.SpellCharges << ",\"ppmRate\":" << spell.SpellPPMRate
+                    << ",\"cooldown\":" << spell.SpellCooldown << ",\"category\":" << spell.SpellCategory
+                    << ",\"categoryCooldown\":" << spell.SpellCategoryCooldown;
+                if (auto const* info = sSpellMgr->GetSpellInfo(spell.SpellId))
+                    out << ",\"name\":\"" << JsonEscape(info->SpellName[0] ? info->SpellName[0] : "") << '"';
+                out << '}';
+            }
+            out << ']';
+        }
+        // Template weapon damage, not character combat damage after bonuses and auras.
+        if (item.Item.ItemClass == ITEM_CLASS_WEAPON && item.Item.Delay)
+        {
+            double minimum = 0, maximum = 0;
+            for (auto const& damage : item.Item.Damage)
+            {
+                minimum += damage.Min;
+                maximum += damage.Max;
+            }
+            out << ",\"weaponSpeed\":" << item.Item.Delay / 1000.0
+                << ",\"weaponDps\":" << (minimum + maximum) * 500.0 / item.Item.Delay;
+        }
+    }
+
     std::string BuildProfile(CharacterRow const& row, std::string const& generatedAt)
     {
         auto equipment = LoadEquipment(row.Guid);
@@ -393,6 +509,7 @@ namespace realm_armory
             // Keep the raw instance enchantment field available for later
             // gem/enchant-aware rendering without exposing any private data.
             out << ", \"enchantments\": \"" << JsonEscape(e.Enchantments) << "\"";
+            WriteInstanceDetails(out, e);
             out << '}';
 
             if (i + 1 != equipment.size()) out << ',';
