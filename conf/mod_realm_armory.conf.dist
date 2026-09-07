@@ -19,3 +19,7 @@ RealmArmory.IncludePlayerbots = 1
 # Account-name prefix used by mod-playerbots for random bot accounts.
 # This should match AiPlayerbot.RandomBotAccountPrefix.
 RealmArmory.PlayerbotAccountPrefix = "rndbot"
+
+# Publish applied appearances when enabled mod-transmog and its compatible
+# character-database table are present. No mod-transmog dependency is required.
+RealmArmory.Transmog.Enable = 1

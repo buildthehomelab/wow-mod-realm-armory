@@ -3,6 +3,7 @@
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
 #include "ObjectMgr.h"
+#include "ModuleMgr.h"
 #include "Item.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
@@ -88,6 +89,7 @@ namespace realm_armory
         uint8 Slot = 0;
         uint32 CurrentDurability = 0;
         std::string Enchantments;
+        uint32 TransmogEntry = 0;
         ItemInfo Item;
     };
 
@@ -229,11 +231,33 @@ namespace realm_armory
         return rows;
     }
 
-    std::vector<EquippedItem> LoadEquipment(uint32 guid)
+    bool TransmogAvailable()
+    {
+        auto const modules = Acore::Module::GetEnableModulesList();
+        if (std::find(modules.begin(), modules.end(), "mod-transmog") == modules.end() ||
+            !sConfigMgr->GetOption<bool>("RealmArmory.Transmog.Enable", true) ||
+            !sConfigMgr->GetOption<bool>("Transmogrification.Enable", true))
+            return false;
+
+        // Inspect metadata first; a server without the optional table must never query it.
+        QueryResult schema = CharacterDatabase.Query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'custom_transmogrification' "
+            "AND COLUMN_NAME IN ('GUID', 'FakeEntry', 'Owner') AND DATA_TYPE = 'int'");
+        return schema && schema->Fetch()[0].Get<uint64>() == 3;
+    }
+
+    std::vector<EquippedItem> LoadEquipment(uint32 guid, bool transmogSupported)
     {
         std::vector<EquippedItem> equipment;
-        QueryResult result = CharacterDatabase.Query(
-            "SELECT ci.slot, ii.itemEntry, ii.durability, ii.enchantments "
+        QueryResult result = transmogSupported ? CharacterDatabase.Query(
+            "SELECT ci.slot, ii.itemEntry, ii.durability, ii.enchantments, tm.FakeEntry "
+            "FROM character_inventory ci "
+            "INNER JOIN item_instance ii ON ii.guid = ci.item "
+            "LEFT JOIN custom_transmogrification tm ON tm.GUID = ii.guid AND tm.Owner = ci.guid "
+            "WHERE ci.guid = {} AND ci.bag = 0 AND ci.slot BETWEEN 0 AND 18 "
+            "ORDER BY ci.slot", guid) : CharacterDatabase.Query(
+            "SELECT ci.slot, ii.itemEntry, ii.durability, ii.enchantments, 0 "
             "FROM character_inventory ci "
             "INNER JOIN item_instance ii ON ii.guid = ci.item "
             "WHERE ci.guid = {} AND ci.bag = 0 AND ci.slot BETWEEN 0 AND 18 "
@@ -249,6 +273,7 @@ namespace realm_armory
             equipped.Item.Entry = f[1].Get<uint32>();
             equipped.CurrentDurability = f[2].Get<uint16>();
             equipped.Enchantments = f[3].Get<std::string>();
+            equipped.TransmogEntry = transmogSupported && !f[4].IsNull() ? f[4].Get<uint32>() : 0;
 
             if (ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(equipped.Item.Entry))
             {
@@ -427,12 +452,33 @@ namespace realm_armory
         }
     }
 
-    std::string BuildProfile(CharacterRow const& row, std::string const& generatedAt)
+    void WriteTransmog(std::ostream& out, uint32 entry)
     {
-        auto equipment = LoadEquipment(row.Guid);
+        out << ",\"transmog\":";
+        if (!entry) { out << "null"; return; }
+        // mod-transmog's HIDDEN_ITEM_ID is a sentinel, not an item template.
+        if (entry == 1) { out << "{\"hidden\":true,\"resolved\":true}"; return; }
+        auto const* item = sObjectMgr->GetItemTemplate(entry);
+        out << "{\"hidden\":false,\"entry\":" << entry
+            << ",\"resolved\":" << (item ? "true" : "false");
+        if (item)
+        {
+            out << ",\"name\":\"" << JsonEscape(item->Name1) << "\",\"displayId\":" << item->DisplayInfoID
+                << ",\"quality\":" << item->Quality << ",\"itemClass\":" << item->Class
+                << ",\"subClass\":" << item->SubClass << ",\"inventoryType\":" << item->InventoryType;
+            if (auto const* display = sItemDisplayInfoStore.LookupEntry(item->DisplayInfoID))
+                out << ",\"icon\":\"" << JsonEscape(display->inventoryIcon ? display->inventoryIcon : "") << '\"';
+        }
+        out << '}';
+    }
+
+    std::string BuildProfile(CharacterRow const& row, std::string const& generatedAt, bool transmogSupported)
+    {
+        auto equipment = LoadEquipment(row.Guid, transmogSupported);
         std::ostringstream out;
         out << "{\n  \"schemaVersion\": 1,\n";
         out << "  \"generatedAt\": \"" << generatedAt << "\",\n";
+        out << "  \"capabilities\": {\"transmogrification\": " << (transmogSupported ? "true" : "false") << "},\n";
         out << "  \"character\": {\n";
         out << "    \"id\": " << row.Guid << ",\n";
         out << "    \"name\": \"" << JsonEscape(row.Name) << "\",\n";
@@ -510,6 +556,7 @@ namespace realm_armory
             // gem/enchant-aware rendering without exposing any private data.
             out << ", \"enchantments\": \"" << JsonEscape(e.Enchantments) << "\"";
             WriteInstanceDetails(out, e);
+            WriteTransmog(out, e.TransmogEntry);
             out << '}';
 
             if (i + 1 != equipment.size()) out << ',';
@@ -528,6 +575,7 @@ namespace realm_armory
             return false;
         }
 
+        bool const transmogSupported = TransmogAvailable();
         auto characters = LoadCharacters();
         std::string generatedAt = IsoNowUtc();
         fs::path root(OutputDirectory);
@@ -538,7 +586,7 @@ namespace realm_armory
 
         for (auto const& row : characters)
         {
-            if (!AtomicWrite(characterDir / (std::to_string(row.Guid) + ".json"), BuildProfile(row, generatedAt)))
+            if (!AtomicWrite(characterDir / (std::to_string(row.Guid) + ".json"), BuildProfile(row, generatedAt, transmogSupported)))
             {
                 LastStatus = "Failed while writing character profile files.";
                 return false;
@@ -548,6 +596,7 @@ namespace realm_armory
         std::ostringstream index;
         index << "{\n  \"schemaVersion\": 1,\n";
         index << "  \"generatedAt\": \"" << generatedAt << "\",\n";
+        index << "  \"capabilities\": {\"transmogrification\": " << (transmogSupported ? "true" : "false") << "},\n";
         index << "  \"characters\": [\n";
         for (size_t i = 0; i < characters.size(); ++i)
         {
