@@ -26,9 +26,9 @@ All settings belong under `[worldserver]`. These are **code defaults**, which ca
 
 ## Commands and publication
 
-Administrator commands are `.realmarmory status` and `.realmarmory publish`. In the worldserver console omit the leading dot. Status reports configuration and last publication status/count/time; publish requests a full export and does not override a disabled module.
+Administrator commands are `.realmarmory status` and `.realmarmory publish`. In the worldserver console omit the leading dot. Status reports configuration, worker state, and last publication status/count/time; publish queues a full export and does not override a disabled module.
 
-Publication runs on startup, periodically, and after configuration reload when enabled. It writes each profile first, then `index.json`, using one UTC `generatedAt` timestamp for the pass:
+Publication runs on startup, periodically, and after configuration reload when enabled. Export work runs on a dedicated background worker so database reads, JSON generation, and filesystem writes cannot block the AzerothCore world-update thread. Requests are coalesced: if storage is slow and another interval/manual request arrives while a publish is running, only one follow-up publish is retained. It writes each profile first, then `index.json`, using one UTC `generatedAt` timestamp for the pass:
 
 ```text
 <output-directory>/

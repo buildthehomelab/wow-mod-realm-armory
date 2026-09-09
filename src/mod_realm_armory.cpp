@@ -12,13 +12,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace realm_armory
@@ -93,6 +96,15 @@ namespace realm_armory
         ItemInfo Item;
     };
 
+    struct PublishJob
+    {
+        std::string OutputDirectory;
+        uint32 MinimumLevel = 1;
+        bool IncludePlayerbots = true;
+        std::string PlayerbotAccountPrefix;
+        bool TransmogEnabled = true;
+    };
+
     bool Enabled = true;
     std::string OutputDirectory = "armory";
     uint32 UpdateIntervalMinutes = 15;
@@ -103,6 +115,7 @@ namespace realm_armory
     std::string LastStatus = "Not published yet.";
     std::string LastPublishedAt;
     uint32 LastCharacterCount = 0;
+    std::mutex StatusMutex;
 
     std::string JsonEscape(std::string const& value)
     {
@@ -176,13 +189,13 @@ namespace realm_armory
         }
     }
 
-    std::set<uint32> LoadPlayerbotAccounts()
+    std::set<uint32> LoadPlayerbotAccounts(std::string const& playerbotAccountPrefix)
     {
         std::set<uint32> accounts;
-        if (PlayerbotAccountPrefix.empty())
+        if (playerbotAccountPrefix.empty())
             return accounts;
 
-        std::string prefix = PlayerbotAccountPrefix;
+        std::string prefix = playerbotAccountPrefix;
         LoginDatabase.EscapeString(prefix);
         QueryResult result = LoginDatabase.Query(
             "SELECT id FROM account WHERE username LIKE '{}%'", prefix);
@@ -197,14 +210,14 @@ namespace realm_armory
         return accounts;
     }
 
-    std::vector<CharacterRow> LoadCharacters()
+    std::vector<CharacterRow> LoadCharacters(PublishJob const& job)
     {
         std::vector<CharacterRow> rows;
-        auto botAccounts = LoadPlayerbotAccounts();
+        auto botAccounts = LoadPlayerbotAccounts(job.PlayerbotAccountPrefix);
         QueryResult result = CharacterDatabase.Query(
             "SELECT guid, account, name, race, class, gender, level, "
             "skin, face, hairStyle, hairColor, facialStyle "
-            "FROM characters WHERE level >= {} ORDER BY name", MinimumLevel);
+            "FROM characters WHERE level >= {} ORDER BY name", job.MinimumLevel);
         if (!result)
             return rows;
 
@@ -225,18 +238,17 @@ namespace realm_armory
             row.HairColor = f[10].Get<uint8>();
             row.FacialStyle = f[11].Get<uint8>();
             row.Playerbot = botAccounts.count(row.Account) != 0;
-            if (!row.Playerbot || IncludePlayerbots)
+            if (!row.Playerbot || job.IncludePlayerbots)
                 rows.push_back(std::move(row));
         } while (result->NextRow());
         return rows;
     }
 
-    bool TransmogAvailable()
+    bool TransmogAvailable(bool transmogEnabled)
     {
         auto const modules = Acore::Module::GetEnableModulesList();
-        if (std::find(modules.begin(), modules.end(), "mod-transmog") == modules.end() ||
-            !sConfigMgr->GetOption<bool>("RealmArmory.Transmog.Enable", true) ||
-            !sConfigMgr->GetOption<bool>("Transmogrification.Enable", true))
+        if (!transmogEnabled ||
+            std::find(modules.begin(), modules.end(), "mod-transmog") == modules.end())
             return false;
 
         // Inspect metadata first; a server without the optional table must never query it.
@@ -567,27 +579,27 @@ namespace realm_armory
         return out.str();
     }
 
-    bool Publish()
+    bool Publish(PublishJob const& job)
     {
-        if (!Enabled)
-        {
-            LastStatus = "Realm Armory is disabled.";
-            return false;
-        }
-
-        bool const transmogSupported = TransmogAvailable();
-        auto characters = LoadCharacters();
+        bool const transmogSupported = TransmogAvailable(job.TransmogEnabled);
+        auto characters = LoadCharacters(job);
         std::string generatedAt = IsoNowUtc();
-        fs::path root(OutputDirectory);
+        fs::path root(job.OutputDirectory);
         fs::path characterDir = root / "characters";
 
         try { fs::create_directories(characterDir); }
-        catch (...) { LastStatus = "Unable to create output directory."; return false; }
+        catch (...)
+        {
+            std::lock_guard<std::mutex> lock(StatusMutex);
+            LastStatus = "Unable to create output directory.";
+            return false;
+        }
 
         for (auto const& row : characters)
         {
             if (!AtomicWrite(characterDir / (std::to_string(row.Guid) + ".json"), BuildProfile(row, generatedAt, transmogSupported)))
             {
+                std::lock_guard<std::mutex> lock(StatusMutex);
                 LastStatus = "Failed while writing character profile files.";
                 return false;
             }
@@ -615,13 +627,138 @@ namespace realm_armory
 
         if (!AtomicWrite(root / "index.json", index.str()))
         {
+            std::lock_guard<std::mutex> lock(StatusMutex);
             LastStatus = "Failed while writing index.json.";
             return false;
         }
 
-        LastPublishedAt = generatedAt;
-        LastCharacterCount = static_cast<uint32>(characters.size());
-        LastStatus = "Published " + std::to_string(LastCharacterCount) + " characters.";
+        {
+            std::lock_guard<std::mutex> lock(StatusMutex);
+            LastPublishedAt = generatedAt;
+            LastCharacterCount = static_cast<uint32>(characters.size());
+            LastStatus = "Published " + std::to_string(LastCharacterCount) + " characters.";
+        }
+        return true;
+    }
+
+    PublishJob MakePublishJob()
+    {
+        PublishJob job;
+        job.OutputDirectory = OutputDirectory;
+        job.MinimumLevel = MinimumLevel;
+        job.IncludePlayerbots = IncludePlayerbots;
+        job.PlayerbotAccountPrefix = PlayerbotAccountPrefix;
+        job.TransmogEnabled =
+            sConfigMgr->GetOption<bool>("RealmArmory.Transmog.Enable", true) &&
+            sConfigMgr->GetOption<bool>("Transmogrification.Enable", true);
+        return job;
+    }
+
+    class PublishWorker
+    {
+    public:
+        void Start()
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            if (_thread.joinable())
+                return;
+
+            _stopping = false;
+            _thread = std::thread([this]() { Run(); });
+        }
+
+        void Stop()
+        {
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                _stopping = true;
+                _pending = false;
+            }
+            _condition.notify_one();
+            if (_thread.joinable())
+                _thread.join();
+        }
+
+        bool Request(PublishJob job)
+        {
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                if (_stopping || !_thread.joinable())
+                    return false;
+
+                // Keep only the newest request. If a publish is already running,
+                // this becomes one coalesced follow-up publish instead of allowing
+                // slow storage to create an unbounded backlog.
+                _job = std::move(job);
+                _pending = true;
+            }
+            _condition.notify_one();
+            return true;
+        }
+
+        bool Busy() const
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            return _running || _pending;
+        }
+
+    private:
+        void Run()
+        {
+            for (;;)
+            {
+                PublishJob job;
+                {
+                    std::unique_lock<std::mutex> lock(_mutex);
+                    _condition.wait(lock, [this]() { return _stopping || _pending; });
+                    if (_stopping)
+                        break;
+
+                    job = _job;
+                    _pending = false;
+                    _running = true;
+                }
+
+                Publish(job);
+
+                {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    _running = false;
+                }
+            }
+        }
+
+        mutable std::mutex _mutex;
+        std::condition_variable _condition;
+        std::thread _thread;
+        PublishJob _job;
+        bool _pending = false;
+        bool _running = false;
+        bool _stopping = false;
+    };
+
+    PublishWorker Worker;
+
+    bool RequestPublish()
+    {
+        if (!Enabled)
+        {
+            std::lock_guard<std::mutex> lock(StatusMutex);
+            LastStatus = "Realm Armory is disabled.";
+            return false;
+        }
+
+        if (!Worker.Request(MakePublishJob()))
+        {
+            std::lock_guard<std::mutex> lock(StatusMutex);
+            LastStatus = "Publish worker is not running.";
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(StatusMutex);
+            LastStatus = "Publish queued.";
+        }
         return true;
     }
 
@@ -642,14 +779,20 @@ namespace realm_armory
         RealmArmoryWorldScript() : WorldScript("RealmArmoryWorldScript") { }
 
         void OnBeforeConfigLoad(bool /*reload*/) override { LoadConfig(); }
-        void OnAfterConfigLoad(bool reload) override { if (reload && Enabled) Publish(); }
-        void OnStartup() override { if (Enabled) Publish(); }
+        void OnAfterConfigLoad(bool reload) override { if (reload && Enabled) RequestPublish(); }
+        void OnStartup() override
+        {
+            Worker.Start();
+            if (Enabled)
+                RequestPublish();
+        }
+        void OnShutdown() override { Worker.Stop(); }
         void OnUpdate(uint32 diff) override
         {
             if (!Enabled) return;
             if (UpdateTimerMs <= diff)
             {
-                Publish();
+                RequestPublish();
                 UpdateTimerMs = UpdateIntervalMinutes * 60 * 1000;
             }
             else UpdateTimerMs -= diff;
@@ -680,18 +823,21 @@ namespace realm_armory
 
         static bool HandleStatus(ChatHandler* handler)
         {
+            bool const workerBusy = Worker.Busy();
+            std::lock_guard<std::mutex> lock(StatusMutex);
             handler->PSendSysMessage("Realm Armory: {}", Enabled ? "enabled" : "disabled");
             handler->PSendSysMessage("Output: {}", OutputDirectory);
             handler->PSendSysMessage("Last publish: {}", LastPublishedAt.empty() ? "never" : LastPublishedAt);
             handler->PSendSysMessage("Characters: {}", LastCharacterCount);
+            handler->PSendSysMessage("Worker: {}", workerBusy ? "busy" : "idle");
             handler->PSendSysMessage("Status: {}", LastStatus);
             return true;
         }
 
         static bool HandlePublish(ChatHandler* handler)
         {
-            bool ok = Publish();
-            handler->PSendSysMessage("[Realm Armory] {}", LastStatus);
+            bool ok = RequestPublish();
+            handler->PSendSysMessage("[Realm Armory] {}", ok ? "Publish queued." : "Unable to queue publish.");
             return ok;
         }
     };
