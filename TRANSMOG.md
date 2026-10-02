@@ -10,6 +10,18 @@ Availability requires all of:
 - RealmArmory.Transmog.Enable and Transmogrification.Enable enabled.
 - All three expected integer columns present in the current character database, checked through information_schema before querying the optional table.
 
+Transmogrification.Enable is read only when mod-transmog is loaded, so a server without it logs no "Missing property" warning.
+
+## mod-transmog-plus
+
+[mod-transmog-plus](https://github.com/buildthehomelab/wow-mod-transmog-plus) is supported the same way, and is preferred when both modules are loaded. It needs:
+
+- mod-transmog-plus in the enabled module registry.
+- RealmArmory.Transmog.Enable and Transmog.Enable (mod-transmog-plus's switch) enabled.
+- `mod_transmog_plus` with integer `Owner` and `FakeEntry` and tinyint `Slot`, checked through information_schema.
+
+It stores one appearance per character and equipment slot, not per item instance, so the export joins on `Owner` and `Slot`. Its hidden sentinel (999999) becomes the usual `{ "hidden": true }`, but only in armor slots. In game, mod-transmog-plus also skips a stored appearance that no longer suits the item now in the slot. Its full rules depend on its config and the player, so the export applies the two that don't: hiding only counts in armor slots, and the appearance must be the same item class (armor or weapon) as the equipped item. Anything else it would reject in game can still show in the export until the player changes it.
+
 No mod-transmog header, library, schema migration or module dependency is added. Absent/disabled modules and missing/incompatible tables publish capability false and use the original equipment query. Disable RealmArmory.Transmog.Enable to opt out explicitly.
 
 ## Additive schema v1 fields

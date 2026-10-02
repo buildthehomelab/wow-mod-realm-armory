@@ -9,9 +9,11 @@ import sqlite3
 import unittest
 
 SOURCE = (Path(__file__).parents[1] / 'src/mod_realm_armory.cpp').read_text()
-block = SOURCE.split('QueryResult result = transmogSupported ?', 1)[1].split('if (!result)', 1)[0]
-queries = ["".join(re.findall(r'"([^"\n]*)"', part)).replace('{}', '1004')
-           for part in block.split(': CharacterDatabase.Query(')]
+block = SOURCE.split('std::vector<EquippedItem> LoadEquipment(', 1)[1].split('if (!result)', 1)[0]
+# LoadEquipment's switch, in order: mod-transmog, mod-transmog-plus, no transmog.
+queries = ["".join(re.findall(r'"([^"\n]*)"', part.split(', guid)', 1)[0])).replace('{}', '1004')
+           for part in block.split('CharacterDatabase.Query(')[1:]]
+TRANSMOG, TRANSMOG_PLUS, PLAIN = queries
 
 class TransmogQueries(unittest.TestCase):
     def setUp(self):
@@ -25,7 +27,7 @@ class TransmogQueries(unittest.TestCase):
     def tearDown(self):
         self.db.close()
     def test_unsupported_has_no_table_dependency(self):
-        rows = self.db.execute(queries[1]).fetchall()
+        rows = self.db.execute(PLAIN).fetchall()
         self.assertEqual(len(rows), 4)
         self.assertTrue(all(row[4] == 0 for row in rows))
     def test_separate_metadata_hidden_and_owner_check(self):
@@ -33,10 +35,21 @@ class TransmogQueries(unittest.TestCase):
             CREATE TABLE custom_transmogrification (GUID INTEGER PRIMARY KEY, FakeEntry INTEGER, Owner INTEGER);
             INSERT INTO custom_transmogrification VALUES (101,16955,1004),(102,1,1004),(103,22691,1004),(104,16953,9999),(105,16952,1004);
         ''')
-        original = self.db.execute(queries[1]).fetchall()
-        dressed = self.db.execute(queries[0]).fetchall()
+        original = self.db.execute(PLAIN).fetchall()
+        dressed = self.db.execute(TRANSMOG).fetchall()
         self.assertEqual([r[:4] for r in original], [r[:4] for r in dressed])
         self.assertEqual({r[0]:r[4] for r in dressed}, {0:16955,2:None,14:1,15:22691})
+    def test_transmog_plus_joins_by_owner_and_slot(self):
+        # One row per character and equipment slot; the item in the slot doesn't matter. The
+        # hidden sentinel and the item-class check are applied in C++ after the SELECT.
+        self.db.executescript('''
+            CREATE TABLE mod_transmog_plus (Owner INTEGER, Slot INTEGER, FakeEntry INTEGER, PRIMARY KEY (Owner, Slot));
+            INSERT INTO mod_transmog_plus VALUES (1004,0,16955),(1004,14,999999),(1004,5,22691),(9999,2,16953);
+        ''')
+        original = self.db.execute(PLAIN).fetchall()
+        dressed = self.db.execute(TRANSMOG_PLUS).fetchall()
+        self.assertEqual([r[:4] for r in original], [r[:4] for r in dressed])
+        self.assertEqual({r[0]:r[4] for r in dressed}, {0:16955,2:None,14:999999,15:None})
 
 if __name__ == '__main__':
     unittest.main()
