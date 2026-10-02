@@ -5,6 +5,7 @@
 #include "ObjectMgr.h"
 #include "ModuleMgr.h"
 #include "Item.h"
+#include "Player.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "ArmoryEnchantments.h"
@@ -21,6 +22,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -96,13 +98,25 @@ namespace realm_armory
         ItemInfo Item;
     };
 
+    // Where applied appearances are read from; see TRANSMOG.md.
+    enum class TransmogSource : uint8
+    {
+        None,
+        Transmog,       // mod-transmog: custom_transmogrification, one row per item instance
+        TransmogPlus    // mod-transmog-plus: mod_transmog_plus, one row per character equipment slot
+    };
+
+    // mod-transmog's HIDDEN_ITEM_ID. mod-transmog-plus's own sentinel is mapped to it on load.
+    constexpr uint32 HIDDEN_APPEARANCE = 1;
+    constexpr uint32 TRANSMOG_PLUS_HIDDEN = 999999;
+
     struct PublishJob
     {
         std::string OutputDirectory;
         uint32 MinimumLevel = 1;
         bool IncludePlayerbots = true;
         std::string PlayerbotAccountPrefix;
-        bool TransmogEnabled = true;
+        TransmogSource Transmog = TransmogSource::None;
     };
 
     bool Enabled = true;
@@ -244,36 +258,122 @@ namespace realm_armory
         return rows;
     }
 
-    bool TransmogAvailable(bool transmogEnabled)
+    // Runs on the world thread. A transmog module's own switch is read only when that module is
+    // loaded, so a server without it doesn't log a "Missing property" warning for it.
+    TransmogSource ConfiguredTransmogSource()
     {
-        auto const modules = Acore::Module::GetEnableModulesList();
-        if (!transmogEnabled ||
-            std::find(modules.begin(), modules.end(), "mod-transmog") == modules.end())
-            return false;
+        if (!sConfigMgr->GetOption<bool>("RealmArmory.Transmog.Enable", true))
+            return TransmogSource::None;
 
-        // Inspect metadata first; a server without the optional table must never query it.
-        QueryResult schema = CharacterDatabase.Query(
-            "SELECT COUNT(*) FROM information_schema.COLUMNS "
-            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'custom_transmogrification' "
-            "AND COLUMN_NAME IN ('GUID', 'FakeEntry', 'Owner') AND DATA_TYPE = 'int'");
-        return schema && schema->Fetch()[0].Get<uint64>() == 3;
+        auto const modules = Acore::Module::GetEnableModulesList();
+        auto const loaded = [&modules](std::string_view name)
+        {
+            return std::find(modules.begin(), modules.end(), name) != modules.end();
+        };
+
+        if (loaded("mod-transmog-plus") && sConfigMgr->GetOption<bool>("Transmog.Enable", true))
+            return TransmogSource::TransmogPlus;
+        if (loaded("mod-transmog") && sConfigMgr->GetOption<bool>("Transmogrification.Enable", true))
+            return TransmogSource::Transmog;
+        return TransmogSource::None;
     }
 
-    std::vector<EquippedItem> LoadEquipment(uint32 guid, bool transmogSupported)
+    TransmogSource AvailableTransmogSource(TransmogSource configured)
+    {
+        // Inspect metadata first; a server without the optional table must never query it.
+        QueryResult schema;
+        switch (configured)
+        {
+            case TransmogSource::Transmog:
+                schema = CharacterDatabase.Query(
+                    "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'custom_transmogrification' "
+                    "AND COLUMN_NAME IN ('GUID', 'FakeEntry', 'Owner') AND DATA_TYPE = 'int'");
+                break;
+            case TransmogSource::TransmogPlus:
+                schema = CharacterDatabase.Query(
+                    "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mod_transmog_plus' "
+                    "AND ((COLUMN_NAME IN ('Owner', 'FakeEntry') AND DATA_TYPE = 'int') "
+                    "OR (COLUMN_NAME = 'Slot' AND DATA_TYPE = 'tinyint'))");
+                break;
+            default:
+                return TransmogSource::None;
+        }
+        return schema && schema->Fetch()[0].Get<uint64>() == 3 ? configured : TransmogSource::None;
+    }
+
+    bool IsArmorSlot(uint8 slot)
+    {
+        switch (slot)
+        {
+            case EQUIPMENT_SLOT_HEAD:
+            case EQUIPMENT_SLOT_SHOULDERS:
+            case EQUIPMENT_SLOT_BODY:
+            case EQUIPMENT_SLOT_CHEST:
+            case EQUIPMENT_SLOT_WAIST:
+            case EQUIPMENT_SLOT_LEGS:
+            case EQUIPMENT_SLOT_FEET:
+            case EQUIPMENT_SLOT_WRISTS:
+            case EQUIPMENT_SLOT_HANDS:
+            case EQUIPMENT_SLOT_BACK:
+            case EQUIPMENT_SLOT_TABARD:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // mod-transmog-plus stores one appearance per slot and, in game, skips one that doesn't suit
+    // the item now in that slot. Its full rules depend on its config and the player; this keeps
+    // the two that need no player: hiding only applies to armor slots, and the appearance must be
+    // the same item class (armor or weapon) as the equipped item.
+    uint32 TransmogPlusEntry(uint8 slot, uint32 fakeEntry, ItemTemplate const* equipped)
+    {
+        if (!fakeEntry)
+            return 0;
+        if (fakeEntry == TRANSMOG_PLUS_HIDDEN)
+            return IsArmorSlot(slot) ? HIDDEN_APPEARANCE : 0;
+
+        ItemTemplate const* appearance = sObjectMgr->GetItemTemplate(fakeEntry);
+        if (!appearance || !equipped || appearance->Class != equipped->Class)
+            return 0;
+        return fakeEntry;
+    }
+
+    std::vector<EquippedItem> LoadEquipment(uint32 guid, TransmogSource transmog)
     {
         std::vector<EquippedItem> equipment;
-        QueryResult result = transmogSupported ? CharacterDatabase.Query(
-            "SELECT ci.slot, ii.itemEntry, ii.durability, ii.enchantments, tm.FakeEntry "
-            "FROM character_inventory ci "
-            "INNER JOIN item_instance ii ON ii.guid = ci.item "
-            "LEFT JOIN custom_transmogrification tm ON tm.GUID = ii.guid AND tm.Owner = ci.guid "
-            "WHERE ci.guid = {} AND ci.bag = 0 AND ci.slot BETWEEN 0 AND 18 "
-            "ORDER BY ci.slot", guid) : CharacterDatabase.Query(
-            "SELECT ci.slot, ii.itemEntry, ii.durability, ii.enchantments, 0 "
-            "FROM character_inventory ci "
-            "INNER JOIN item_instance ii ON ii.guid = ci.item "
-            "WHERE ci.guid = {} AND ci.bag = 0 AND ci.slot BETWEEN 0 AND 18 "
-            "ORDER BY ci.slot", guid);
+        QueryResult result;
+        switch (transmog)
+        {
+            case TransmogSource::Transmog:
+                result = CharacterDatabase.Query(
+                    "SELECT ci.slot, ii.itemEntry, ii.durability, ii.enchantments, tm.FakeEntry "
+                    "FROM character_inventory ci "
+                    "INNER JOIN item_instance ii ON ii.guid = ci.item "
+                    "LEFT JOIN custom_transmogrification tm ON tm.GUID = ii.guid AND tm.Owner = ci.guid "
+                    "WHERE ci.guid = {} AND ci.bag = 0 AND ci.slot BETWEEN 0 AND 18 "
+                    "ORDER BY ci.slot", guid);
+                break;
+            case TransmogSource::TransmogPlus:
+                result = CharacterDatabase.Query(
+                    "SELECT ci.slot, ii.itemEntry, ii.durability, ii.enchantments, tm.FakeEntry "
+                    "FROM character_inventory ci "
+                    "INNER JOIN item_instance ii ON ii.guid = ci.item "
+                    "LEFT JOIN mod_transmog_plus tm ON tm.Owner = ci.guid AND tm.Slot = ci.slot "
+                    "WHERE ci.guid = {} AND ci.bag = 0 AND ci.slot BETWEEN 0 AND 18 "
+                    "ORDER BY ci.slot", guid);
+                break;
+            default:
+                result = CharacterDatabase.Query(
+                    "SELECT ci.slot, ii.itemEntry, ii.durability, ii.enchantments, 0 "
+                    "FROM character_inventory ci "
+                    "INNER JOIN item_instance ii ON ii.guid = ci.item "
+                    "WHERE ci.guid = {} AND ci.bag = 0 AND ci.slot BETWEEN 0 AND 18 "
+                    "ORDER BY ci.slot", guid);
+                break;
+        }
         if (!result)
             return equipment;
 
@@ -285,7 +385,10 @@ namespace realm_armory
             equipped.Item.Entry = f[1].Get<uint32>();
             equipped.CurrentDurability = f[2].Get<uint16>();
             equipped.Enchantments = f[3].Get<std::string>();
-            equipped.TransmogEntry = transmogSupported && !f[4].IsNull() ? f[4].Get<uint32>() : 0;
+            equipped.TransmogEntry = transmog != TransmogSource::None && !f[4].IsNull() ? f[4].Get<uint32>() : 0;
+            if (transmog == TransmogSource::TransmogPlus)
+                equipped.TransmogEntry = TransmogPlusEntry(equipped.Slot, equipped.TransmogEntry,
+                    sObjectMgr->GetItemTemplate(equipped.Item.Entry));
 
             if (ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(equipped.Item.Entry))
             {
@@ -468,8 +571,8 @@ namespace realm_armory
     {
         out << ",\"transmog\":";
         if (!entry) { out << "null"; return; }
-        // mod-transmog's HIDDEN_ITEM_ID is a sentinel, not an item template.
-        if (entry == 1) { out << "{\"hidden\":true,\"resolved\":true}"; return; }
+        // The hidden sentinel is not an item template.
+        if (entry == HIDDEN_APPEARANCE) { out << "{\"hidden\":true,\"resolved\":true}"; return; }
         auto const* item = sObjectMgr->GetItemTemplate(entry);
         out << "{\"hidden\":false,\"entry\":" << entry
             << ",\"resolved\":" << (item ? "true" : "false");
@@ -484,9 +587,10 @@ namespace realm_armory
         out << '}';
     }
 
-    std::string BuildProfile(CharacterRow const& row, std::string const& generatedAt, bool transmogSupported)
+    std::string BuildProfile(CharacterRow const& row, std::string const& generatedAt, TransmogSource transmog)
     {
-        auto equipment = LoadEquipment(row.Guid, transmogSupported);
+        bool const transmogSupported = transmog != TransmogSource::None;
+        auto equipment = LoadEquipment(row.Guid, transmog);
         std::ostringstream out;
         out << "{\n  \"schemaVersion\": 1,\n";
         out << "  \"generatedAt\": \"" << generatedAt << "\",\n";
@@ -581,7 +685,8 @@ namespace realm_armory
 
     bool Publish(PublishJob const& job)
     {
-        bool const transmogSupported = TransmogAvailable(job.TransmogEnabled);
+        TransmogSource const transmog = AvailableTransmogSource(job.Transmog);
+        bool const transmogSupported = transmog != TransmogSource::None;
         auto characters = LoadCharacters(job);
         std::string generatedAt = IsoNowUtc();
         fs::path root(job.OutputDirectory);
@@ -597,7 +702,7 @@ namespace realm_armory
 
         for (auto const& row : characters)
         {
-            if (!AtomicWrite(characterDir / (std::to_string(row.Guid) + ".json"), BuildProfile(row, generatedAt, transmogSupported)))
+            if (!AtomicWrite(characterDir / (std::to_string(row.Guid) + ".json"), BuildProfile(row, generatedAt, transmog)))
             {
                 std::lock_guard<std::mutex> lock(StatusMutex);
                 LastStatus = "Failed while writing character profile files.";
@@ -648,9 +753,7 @@ namespace realm_armory
         job.MinimumLevel = MinimumLevel;
         job.IncludePlayerbots = IncludePlayerbots;
         job.PlayerbotAccountPrefix = PlayerbotAccountPrefix;
-        job.TransmogEnabled =
-            sConfigMgr->GetOption<bool>("RealmArmory.Transmog.Enable", true) &&
-            sConfigMgr->GetOption<bool>("Transmogrification.Enable", true);
+        job.Transmog = ConfiguredTransmogSource();
         return job;
     }
 

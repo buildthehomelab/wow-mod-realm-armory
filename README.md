@@ -22,7 +22,7 @@ All settings belong under `[worldserver]`. These are **code defaults**, which ca
 | `RealmArmory.MinimumLevel` | `1` | Minimum included level; configured threshold capped at 80, not a maximum character level. |
 | `RealmArmory.IncludePlayerbots` | `1` | Include accounts identified by the configured random-bot prefix. |
 | `RealmArmory.PlayerbotAccountPrefix` | `"rndbot"` | Match the random-bot account prefix, normally `AiPlayerbot.RandomBotAccountPrefix`. |
-| `RealmArmory.Transmog.Enable` | `1` | Allow optional applied-appearance export when module, settings and schema are compatible. |
+| `RealmArmory.Transmog.Enable` | `1` | Allow optional applied-appearance export from mod-transmog or mod-transmog-plus when the module, its settings and its schema are compatible. |
 
 ## Commands and publication
 
@@ -60,7 +60,7 @@ Portalkeeper resolves `characters/<guid>.json` relative to that URL, caches rost
 
 [JSON contract](docs/json-contract.md) documents character appearance, original item stats, damage/speed/DPS, enchants, actual gems, sockets, spell metadata and null/unresolved behavior. All additions retain `schemaVersion: 1`.
 
-[Optional mod-transmog integration](TRANSMOG.md) documents capability detection, owner-scoped appearance lookup, hidden items and operation without the module. Real equipped item data is never replaced with appearance stats.
+[Optional mod-transmog and mod-transmog-plus integration](TRANSMOG.md) documents capability detection, owner-scoped appearance lookup, hidden items and operation without the module. Real equipped item data is never replaced with appearance stats.
 
 ## Verification
 
