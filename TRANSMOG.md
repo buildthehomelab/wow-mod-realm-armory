@@ -1,8 +1,8 @@
 # Optional applied transmog export
 
-The integration targets the [upstream mod-transmog contract](https://github.com/azerothcore/mod-transmog). The target server checkout was unavailable during implementation; its exact deployed revision remains to be checked. See [installation and configuration](README.md) and the [JSON contract](docs/json-contract.md).
+The integration targets the [upstream mod-transmog contract](https://github.com/azerothcore/mod-transmog). See [installation and configuration](README.md) and the [JSON contract](docs/json-contract.md).
 
-Verified upstream contracts: Transmogrification.h defines HIDDEN_ITEM_ID as 1; Transmogrification.cpp SetFakeEntry writes GUID/FakeEntry/Owner to custom_transmogrification, and reads Transmogrification.Enable for module enablement. The supplied character database backup has matching unsigned integer columns and a primary key on GUID. GUID is an item-instance ID, FakeEntry is an item-template entry, and Owner is a character ID.
+Verified upstream contracts: Transmogrification.h defines HIDDEN_ITEM_ID as 1; Transmogrification.cpp SetFakeEntry writes GUID/FakeEntry/Owner to custom_transmogrification, and reads Transmogrification.Enable for module enablement. GUID is an item-instance ID, FakeEntry is an item-template entry, and Owner is a character ID.
 
 Availability requires all of:
 
@@ -37,8 +37,6 @@ Every equipment item adds `transmog`, without replacing original item fields:
 
 The equipped instance joins on both GUID and Owner. Bag items and another character's rows cannot supply an equipped appearance. Account identifiers and item-instance IDs are not added to published JSON. Stats, enchants, gems, damage, durability, original icons and existing privacy remain unchanged. Exports reflect saved database state at publication time.
 
-## Verification and deployment
+## Tests
 
-GNU C++20 syntax checking passed against the local Playerbot AzerothCore headers with no mod-transmog installed. Existing enchantment parser tests passed. tests/transmog_query_test.py executes the actual exporter SELECT statements against isolated SQLite fixtures, covering an absent optional table, original fields, hidden state, equipped-only filtering and owner isolation. This does not replace a MySQL/worldserver integration test.
-
-The running server is inaccessible. Deploy this module, build/link worldserver with the server's installed core, restart it and publish with `.realmarmory publish`. Confirm both index and profile capabilities and a test character’s saved appearances in the resulting files. Verify a disabled/no-transmog server publishes normally. No deployment, database writes or live publication were performed here.
+`tests/transmog_query_test.py` runs the exporter's SELECT statements against isolated SQLite fixtures: an absent optional table, original fields, hidden state, equipped-only filtering and owner isolation. Not yet checked: a MySQL/worldserver run with mod-transmog or mod-transmog-plus loaded. To try it, build and restart worldserver, run `.realmarmory publish`, and confirm both `index.json` and a profile carry `capabilities.transmogrification`. A server without a transmog module should publish normally with it false.
