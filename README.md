@@ -4,7 +4,13 @@ AzerothCore module publishing a read-only, schema-v1 character Armory for Portal
 
 ## Installation
 
-Place this repository at `<core-source>/modules/mod-realm-armory`, reconfigure and build your AzerothCore worldserver using that core's normal build instructions, then install the rebuilt server. [CMakeLists.txt](CMakeLists.txt) registers the module source with AzerothCore; this is not a standalone CMake application.
+Clone this repository into `<core-source>/modules/mod-realm-armory` (the repo is `wow-mod-realm-armory`; the module folder is `mod-realm-armory`):
+
+```
+git clone https://github.com/buildthehomelab/wow-mod-realm-armory.git mod-realm-armory
+```
+
+Reconfigure and build your AzerothCore worldserver using that core's normal build instructions, then install the rebuilt server. [CMakeLists.txt](CMakeLists.txt) registers the module source with AzerothCore; this is not a standalone CMake application.
 
 Copy [conf/mod_realm_armory.conf.dist](conf/mod_realm_armory.conf.dist) to the server's module configuration directory as `mod_realm_armory.conf` (normally `<server-config>/modules/`). Set the output directory explicitly before starting worldserver. The current distributed template contains a deployment-specific absolute output path; replace it with a location such as `armory` or `/srv/realm-public/armory`. The code fallback, when the option is absent, is `armory`.
 
@@ -75,3 +81,7 @@ python3 tests/transmog_query_test.py
 Earlier Linux work exercised parser/query checks and C++20 syntax checking against Playerbot-core headers. SQLite query fixtures are not MySQL integration tests. A linked worldserver build and controlled live publication with the target server's installed modules/schema remain to be verified. This documentation review did not rerun builds or rendering suites. See [implementation issues and verification gaps](docs/implementation-issues.md).
 
 See [LICENSE](LICENSE).
+
+## Credits
+
+Forked from [Hisha/mod-realm-armory](https://github.com/Hisha/mod-realm-armory), the original module.
