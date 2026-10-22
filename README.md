@@ -12,7 +12,7 @@ git clone https://github.com/buildthehomelab/wow-mod-realm-armory.git mod-realm-
 
 Reconfigure and build your AzerothCore worldserver using that core's normal build instructions, then install the rebuilt server. [CMakeLists.txt](CMakeLists.txt) registers the module source with AzerothCore; this is not a standalone CMake application.
 
-Copy [conf/mod_realm_armory.conf.dist](conf/mod_realm_armory.conf.dist) to the server's module configuration directory as `mod_realm_armory.conf` (normally `<server-config>/modules/`). Set the output directory explicitly before starting worldserver. The current distributed template contains a deployment-specific absolute output path; replace it with a location such as `armory` or `/srv/realm-public/armory`. The code fallback, when the option is absent, is `armory`.
+Copy [conf/mod_realm_armory.conf.dist](conf/mod_realm_armory.conf.dist) to the server's module configuration directory as `mod_realm_armory.conf` (normally `<server-config>/modules/`). Set the output directory explicitly before starting worldserver. The default is `armory`, relative to worldserver's working directory; use an absolute path such as `/srv/realm-public/armory` to publish elsewhere.
 
 Required: a compatible AzerothCore source/build environment, its normal character/login databases, loaded item templates and DBC stores, and filesystem write access for worldserver. The source uses the core module registry API in `ModuleMgr.h`. Neither Portalkeeper, an HTTP server, mod-playerbots nor mod-transmog is a build dependency. HTTP hosting is needed only for remote consumers.
 
@@ -43,7 +43,7 @@ Publication runs on startup, periodically, and after configuration reload when e
     <character-guid>.json
 ```
 
-Files are written through `.tmp` files, but replacement currently removes the old destination before rename. This is **not an atomic whole-feed snapshot or guaranteed atomic replacement**. Deleted or newly excluded characters disappear from the next roster; their old profile files are not automatically deleted. See [implementation issues](docs/implementation-issues.md) before treating exclusion as removal from a public website.
+Files are written through `.tmp` files, but replacement currently removes the old destination before rename. This is **not an atomic whole-feed snapshot or guaranteed atomic replacement**. Deleted or newly excluded characters disappear from the next roster; their old profile files are not automatically deleted. Remove stale profile files by hand before treating exclusion as removal from a public website.
 
 Characters are selected from saved database rows at or above the threshold, including offline characters. Equipped inventory slots 0–18 in bag 0 are exported; bags and bank contents are not. Bot classification uses account-name prefix matching in the login database, not an online AI state or a mandatory Playerbot API. It can classify only accounts matching that convention; ordinary-account bots may appear as players.
 
@@ -68,9 +68,9 @@ Portalkeeper resolves `characters/<guid>.json` relative to that URL, caches rost
 
 [Optional mod-transmog and mod-transmog-plus integration](TRANSMOG.md) documents capability detection, owner-scoped appearance lookup, hidden items and operation without the module. Real equipped item data is never replaced with appearance stats.
 
-## Verification
+## Tests
 
-From this repository root, the existing focused checks are:
+From this repository root:
 
 ```sh
 g++ -std=c++17 -Wall -Wextra -Werror -Isrc tests/enchantments_test.cpp -o /tmp/armory-enchantments-test
@@ -78,7 +78,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -Isrc tests/enchantments_test.cpp -o /tmp/a
 python3 tests/transmog_query_test.py
 ```
 
-Earlier Linux work exercised parser/query checks and C++20 syntax checking against Playerbot-core headers. SQLite query fixtures are not MySQL integration tests. A linked worldserver build and controlled live publication with the target server's installed modules/schema remain to be verified. This documentation review did not rerun builds or rendering suites. See [implementation issues and verification gaps](docs/implementation-issues.md).
+The SQLite query fixtures are not MySQL integration tests. Not yet checked: a linked worldserver build and a live publication against a server's installed modules and schema.
 
 See [LICENSE](LICENSE).
 
