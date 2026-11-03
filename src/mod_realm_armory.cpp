@@ -228,10 +228,14 @@ namespace realm_armory
     {
         std::vector<CharacterRow> rows;
         auto botAccounts = LoadPlayerbotAccounts(job.PlayerbotAccountPrefix);
+        // A core with home screens keeps a row per account that nobody plays; others have no such column.
+        std::string const notViewer = CharacterDatabase.Query(
+            "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = 'characters' AND COLUMN_NAME = 'home_viewer'") ? " AND home_viewer = 0" : "";
         QueryResult result = CharacterDatabase.Query(
             "SELECT guid, account, name, race, class, gender, level, "
             "skin, face, hairStyle, hairColor, facialStyle "
-            "FROM characters WHERE level >= {} ORDER BY name", job.MinimumLevel);
+            "FROM characters WHERE level >= {}{} ORDER BY name", job.MinimumLevel, notViewer);
         if (!result)
             return rows;
 
